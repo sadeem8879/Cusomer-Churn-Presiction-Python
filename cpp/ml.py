@@ -6,25 +6,37 @@
 # from dotenv import load_dotenv
 # from sqlalchemy import create_engine
 # from sklearn.model_selection import train_test_split
-# from sklearn.preprocessing import StandardScaler
+# from sklearn.preprocessing import StandardScaler, OneHotEncoder
 # from sklearn.ensemble import RandomForestClassifier
 # from sklearn.impute import SimpleImputer
 # from sklearn.metrics import accuracy_score
+# from sqlalchemy import text
 
 # # ✅ Configure Logging
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# logging.basicConfig(level=logging.INFO)
 
-# # ✅ Load environment variables
+# # ✅ Load Environment Variables
 # load_dotenv()
 # DB_URL = os.getenv("DATABASE_URL")
 
 # if not DB_URL:
-#     logging.error("❌ DATABASE_URL not found! Please set it in the .env file.")
+#     logging.error("❌ DATABASE_URL missing! Check .env file.")
+#     exit()
+# # ✅ Establish Database Connection
+# try:
+#     engine = create_engine(DB_URL, pool_pre_ping=True)
+#     with engine.connect() as conn:
+#         result = conn.execute(text("SELECT 1")).fetchone()  # ✅ FIXED
+#         logging.info(f"✅ Database Test Query Result: {result[0]}")
+
+#     logging.info("✅ Connected to database!")
+# except Exception as e:
+#     logging.error(f"❌ Database connection failed: {e}")
 #     exit()
 
-# # ✅ Connect to PostgreSQL and Fetch Data
+
+# # ✅ Fetch Data
 # try:
-#     engine = create_engine(DB_URL)
 #     df = pd.read_sql("SELECT * FROM user_full_dataset;", engine)
 #     logging.info("✅ Data fetched successfully!")
 # except Exception as e:
@@ -35,66 +47,58 @@
 # numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
 # df[numeric_columns] = SimpleImputer(strategy="mean").fit_transform(df[numeric_columns])
 
-# # ✅ Convert `recency_days` to numeric
-# if "recency_days" in df.columns:
-#     df["recency_days"] = pd.to_numeric(df["recency_days"], errors="coerce")
+# # ✅ Feature Engineering
+# df["frequency"] = df["total_orders"] / ((df["recency_days"].replace(0, np.nan) / 30) + 1)
+# df["frequency"] = df["frequency"].fillna(0)
 
-# # ✅ Feature Engineering - Frequency Calculation
-# if "total_orders" in df.columns and "recency_days" in df.columns:
-#     df["frequency"] = df["total_orders"] / ((df["recency_days"].replace(0, np.nan) / 30) + 1)  
-#     df["frequency"] = df["frequency"].fillna(0)
+# # ✅ Dynamic Churn Threshold (75th percentile of inactivity)
+# threshold = df["recency_days"].quantile(0.75)
+# df["churn"] = np.where(df["recency_days"] > threshold, 1, 0)
 
-# # ✅ Define Churn Threshold
-# CHURN_THRESHOLD = 90
-# df["churn"] = np.where(df["recency_days"] > CHURN_THRESHOLD, 1, 0)
+# # ✅ Drop Unnecessary Columns
+# df.drop(columns=["user_id", "user_email"], errors="ignore", inplace=True)
 
-# # ✅ Drop Non-Informative Columns
-# drop_columns = ["user_id", "user_email", "user_name", "last_order_date", "last_login_date"]
-# df.drop(columns=[col for col in drop_columns if col in df.columns], errors="ignore", inplace=True)
+# # ✅ One-Hot Encoding for Categorical Variables
+# categorical_cols = df.select_dtypes(include=["object"]).columns.tolist()
+# encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 
-# # ✅ Dynamically Convert Categorical Variables
-# categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
-# df = pd.get_dummies(df, columns=categorical_columns, drop_first=True)
+# df_encoded = pd.DataFrame(encoder.fit_transform(df[categorical_cols]))
+# df_encoded.columns = encoder.get_feature_names_out(categorical_cols)
 
-# # ✅ Ensure All Columns Are Numeric
-# df = df.apply(pd.to_numeric, errors='coerce')
+# df = df.drop(columns=categorical_cols).reset_index(drop=True)
+# df = pd.concat([df, df_encoded], axis=1)
 
-# # ✅ Define Features and Target
-# X = df.drop(columns=["churn"])
-# y = df["churn"]
-
-# # ✅ Save Feature Names for Consistency
+# # ✅ Feature & Label Separation
+# X, y = df.drop(columns=["churn"]), df["churn"]
 # trained_features = X.columns.tolist()
 
 # # ✅ Train-Test Split
-# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# # ✅ Scale Features
+# # ✅ Feature Scaling
 # scaler = StandardScaler()
-# X_train_scaled = scaler.fit_transform(X_train)
-# X_test_scaled = scaler.transform(X_test)
+# X_train_scaled, X_test_scaled = scaler.fit_transform(X_train), scaler.transform(X_test)
 
-# # ✅ Train Model
+# # ✅ Model Training
 # model = RandomForestClassifier(n_estimators=200, random_state=42)
 # model.fit(X_train_scaled, y_train)
 
-# # ✅ Evaluate Model
+# # ✅ Model Evaluation
 # accuracy = accuracy_score(y_test, model.predict(X_test_scaled))
 # logging.info(f"✅ Model Accuracy: {accuracy:.4f}")
 
-# # ✅ Save Model & Scaler
-# BASE_DIR = os.path.dirname(__file__)
-
-# with open(os.path.join(BASE_DIR, "model.pkl"), "wb") as f:
+# # ✅ Save Model, Scaler, and Features
+# with open("model.pkl", "wb") as f:
 #     pickle.dump(model, f)
 
-# with open(os.path.join(BASE_DIR, "scaler.pkl"), "wb") as f:
+# with open("scaler.pkl", "wb") as f:
 #     pickle.dump(scaler, f)
 
-# with open(os.path.join(BASE_DIR, "trained_features.pkl"), "wb") as f:
+# with open("trained_features.pkl", "wb") as f:
 #     pickle.dump(trained_features, f)
 
-# logging.info("✅ Model, Scaler & Features saved successfully!")
+# logging.info("✅ Model saved successfully!")
+
 
 import os
 import pickle
@@ -102,94 +106,96 @@ import logging
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score
 
 # ✅ Configure Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ✅ Load environment variables
+# ✅ Load Environment Variables
 load_dotenv()
 DB_URL = os.getenv("DATABASE_URL")
 
 if not DB_URL:
-    logging.error("❌ DATABASE_URL not found! Please set it in the .env file.")
+    logger.error("❌ DATABASE_URL missing! Check .env file.")
     exit()
 
-# ✅ Connect to PostgreSQL and Fetch Data
+# ✅ Establish Database Connection
 try:
-    engine = create_engine(DB_URL)
-    df = pd.read_sql("SELECT * FROM user_full_dataset;", engine)
-    logging.info("✅ Data fetched successfully!")
+    engine = create_engine(DB_URL, pool_pre_ping=True)
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT 1")).fetchone()  # Test connection
+        logger.info(f"✅ Database Test Query Result: {result[0]}")
+    logger.info("✅ Connected to database!")
 except Exception as e:
-    logging.error(f"❌ Error fetching data: {e}")
+    logger.error(f"❌ Database connection failed: {e}")
+    exit()
+
+# ✅ Fetch Data
+try:
+    df = pd.read_sql("SELECT * FROM user_full_dataset;", engine)
+    logger.info("✅ Data fetched successfully!")
+except Exception as e:
+    logger.error(f"❌ Error fetching data: {e}")
     exit()
 
 # ✅ Handle Missing Values
 numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
 df[numeric_columns] = SimpleImputer(strategy="mean").fit_transform(df[numeric_columns])
 
-# ✅ Convert `recency_days` to numeric
-if "recency_days" in df.columns:
-    df["recency_days"] = pd.to_numeric(df["recency_days"], errors="coerce")
+# ✅ Feature Engineering
+df["frequency"] = df["total_orders"] / (df["recency_days"].replace(0, np.nan) / 30 + 1)
+df["frequency"] = df["frequency"].fillna(0)
 
-# ✅ Feature Engineering - Frequency Calculation
-if "total_orders" in df.columns and "recency_days" in df.columns:
-    df["frequency"] = df["total_orders"] / ((df["recency_days"].replace(0, np.nan) / 30) + 1)  
-    df["frequency"] = df["frequency"].fillna(0)
+# ✅ Dynamic Churn Threshold (75th percentile of inactivity)
+threshold = df["recency_days"].quantile(0.75)
+df["churn"] = np.where(df["recency_days"] > threshold, 1, 0)
 
-# ✅ Define Churn Threshold
-CHURN_THRESHOLD = 90
-df["churn"] = np.where(df["recency_days"] > CHURN_THRESHOLD, 1, 0)
+# ✅ Drop Unnecessary Columns
+df.drop(columns=["user_id", "user_email"], errors="ignore", inplace=True)
 
-# ✅ Drop Non-Informative Columns
-drop_columns = ["user_id", "user_email", "user_name", "last_order_date", "last_login_date"]
-df.drop(columns=[col for col in drop_columns if col in df.columns], errors="ignore", inplace=True)
+# ✅ One-Hot Encoding for Categorical Variables
+categorical_cols = df.select_dtypes(include=["object"]).columns.tolist()
+encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 
-# ✅ Dynamically Convert Categorical Variables
-categorical_columns = df.select_dtypes(include=["object"]).columns.tolist()
-df = pd.get_dummies(df, columns=categorical_columns, drop_first=True)
+df_encoded = pd.DataFrame(encoder.fit_transform(df[categorical_cols]))
+df_encoded.columns = encoder.get_feature_names_out(categorical_cols)
 
-# ✅ Ensure All Columns Are Numeric
-df = df.apply(pd.to_numeric, errors='coerce')
+df = df.drop(columns=categorical_cols).reset_index(drop=True)
+df = pd.concat([df, df_encoded], axis=1)
 
-# ✅ Define Features and Target
-X = df.drop(columns=["churn"])
-y = df["churn"]
-
-# ✅ Save Feature Names for Consistency
+# ✅ Feature & Label Separation
+X, y = df.drop(columns=["churn"]), df["churn"]
 trained_features = X.columns.tolist()
 
 # ✅ Train-Test Split
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# ✅ Scale Features
+# ✅ Feature Scaling
 scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
+X_train_scaled, X_test_scaled = scaler.fit_transform(X_train), scaler.transform(X_test)
 
-# ✅ Train Model
+# ✅ Model Training
 model = RandomForestClassifier(n_estimators=200, random_state=42)
 model.fit(X_train_scaled, y_train)
 
-# ✅ Evaluate Model
+# ✅ Model Evaluation
 accuracy = accuracy_score(y_test, model.predict(X_test_scaled))
-logging.info(f"✅ Model Accuracy: {accuracy:.4f}")
+logger.info(f"✅ Model Accuracy: {accuracy:.4f}")
 
-# ✅ Save Model & Scaler
-BASE_DIR = os.path.dirname(__file__)
-
-with open(os.path.join(BASE_DIR, "model.pkl"), "wb") as f:
+# ✅ Save Model, Scaler, and Features
+with open("model.pkl", "wb") as f:
     pickle.dump(model, f)
 
-with open(os.path.join(BASE_DIR, "scaler.pkl"), "wb") as f:
+with open("scaler.pkl", "wb") as f:
     pickle.dump(scaler, f)
 
-with open(os.path.join(BASE_DIR, "trained_features.pkl"), "wb") as f:
+with open("trained_features.pkl", "wb") as f:
     pickle.dump(trained_features, f)
 
-logging.info("✅ Model, Scaler & Features saved successfully!")
+logger.info("✅ Model saved successfully!")
