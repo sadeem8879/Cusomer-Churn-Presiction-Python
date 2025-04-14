@@ -1131,6 +1131,52 @@ def get_retention_rate():
         logger.error(f"Error in /retention-rate: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+@app.route('/predict-form', methods=['POST'])
+def predict_from_manual_form():
+    try:
+        data = request.json
+
+        df = pd.DataFrame([{
+            'age': data.get('age', 0),
+            'gender': data.get('gender', '').lower(),
+            'state': data.get('state', '').lower(),
+            'product_category': data.get('product_category', '').lower(),
+            'total_orders': data.get('total_orders', 0),
+            'total_spent': data.get('total_spent', 0),
+            'recency_days': data.get('recency_days', 0),
+            'engagement_score': data.get('engagement_score', 0)
+        }])
+
+        # One-hot encode
+        df = pd.get_dummies(df, columns=['gender', 'state', 'product_category'])
+
+        for feat in trained_features:
+            if feat not in df.columns:
+                df[feat] = 0
+
+        df = df.reindex(columns=trained_features, fill_value=0)
+        scaled = scaler.transform(df)
+
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(scaled)
+            prediction = proba[0][1] if proba.shape[1] > 1 else proba[0][0]
+        else:
+            prediction = model.predict(scaled)[0]
+
+        churn_risk = categorize_risk(prediction)
+        status = calculate_customer_status(data)
+
+        return jsonify({
+            "prediction": prediction,
+            "risk": churn_risk,
+            "status": status,
+            "explanation": generate_churn_explanation(data, prediction),
+            "model_version": MODEL_VERSION
+        })
+
+    except Exception as e:
+        logger.error("Prediction error", exc_info=True)
+        return jsonify({"error": "Prediction failed", "details": str(e)}), 500
 
 @app.route('/export', methods=['GET'])
 def export_data():
