@@ -15,6 +15,9 @@ from datetime import datetime, timedelta
 import traceback
 from functools import lru_cache
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.orm import Session
+from io import StringIO
+
 
 model = pickle.load(open("model.pkl", "rb"))
 scaler = pickle.load(open("scaler.pkl", "rb"))
@@ -133,12 +136,13 @@ try:
 except Exception as e:
     logger.critical(f"Database connection failed: {str(e)}")
     exit(1)
-
+    
 # User Model
 class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80))
-    email = db.Column(db.String(120))
+    __tablename__ = "user_full_dataset"
+    user_id = db.Column(db.Integer, primary_key=True)  # Changed from id to user_id
+    username = db.Column('user_name', db.String(80))  # Added column name mapping
+    email = db.Column('user_email', db.String(120))  # Added column name mapping
     age = db.Column(db.Integer)
     gender = db.Column(db.String(10))
     state = db.Column(db.String(50))
@@ -150,7 +154,6 @@ class User(db.Model):
     churn_probability = db.Column(db.Float)
     churn_risk = db.Column(db.String(20))
     customer_status = db.Column(db.String(20))
-
 # Utility functions
 def categorize_risk(prob):
     try:
@@ -1209,28 +1212,35 @@ def predict_churn():
                             "message": f"{field} must be a valid number"
                         }), 400
                 elif field_type == 'categorical':
-                    customer_df[field] = customer_df[field].astype(str).str.lower().str.strip()
+                    customer_df[field] = customer_df[field].astype(str).str.strip()
             except Exception as e:
                 return jsonify({
                     "error": f"Invalid {field} value",
                     "message": str(e)
                 }), 400
 
-        # One-hot encode
-        customer_df = pd.get_dummies(customer_df, columns=['gender', 'state', 'product_category'])
+        # One-hot encode matching training structure
+        categorical_fields = ['gender', 'state', 'product_category', 'age_group', 'product_name']
+        customer_df = pd.get_dummies(customer_df, columns=[col for col in categorical_fields if col in customer_df.columns])
 
-        # Fill missing features
+        # Fill missing trained features with 0
         for feature in trained_features:
             if feature not in customer_df.columns:
                 customer_df[feature] = 0
 
-        # Ensure column order
+        # Ensure feature alignment
         customer_df = customer_df.reindex(columns=trained_features, fill_value=0)
 
-        # Scale
+        # Log mismatches
+        missing = [f for f in trained_features if f not in customer_df.columns]
+        extra = [f for f in customer_df.columns if f not in trained_features]
+        logger.warning(f"Missing features: {missing}")
+        logger.warning(f"Unexpected features: {extra}")
+
+        # Scale input
         X_scaled = scaler.transform(customer_df)
 
-        # Predict
+        # Predict churn
         if hasattr(model, 'predict_proba'):
             proba = model.predict_proba(X_scaled)
             prediction = proba[0, 1] if proba.shape[1] > 1 else proba[0, 0]
@@ -1244,7 +1254,6 @@ def predict_churn():
 
         if hasattr(model, "feature_importances_"):
             importances = model.feature_importances_
-            logger.info(f"Raw model feature_importances_: {importances}")
             if importances.sum() > 0:
                 importances /= importances.sum()
             else:
@@ -1258,7 +1267,6 @@ def predict_churn():
             if len(coef.shape) > 1:
                 coef = coef[1] if coef.shape[0] > 1 else coef[0]
             abs_coef = np.abs(coef)
-            logger.info(f"Raw model coef_: {coef}")
             if abs_coef.sum() > 0:
                 abs_coef /= abs_coef.sum()
             else:
@@ -1268,7 +1276,6 @@ def predict_churn():
             }
 
         else:
-            # Fallback: correlation-based importance
             logger.warning("Using fallback correlation-based importance.")
             try:
                 variation = X_scaled.copy()
@@ -1277,9 +1284,6 @@ def predict_churn():
 
                 if hasattr(model, "predict_proba"):
                     y_variations = model.predict_proba(X_variations)[:, 1]
-                    logger.info(f"y_variations preview: {y_variations[:10]}")
-                    logger.info(f"y_variations std: {np.std(y_variations):.4f}")
-
                 else:
                     y_variations = model.predict(X_variations)
 
@@ -1302,12 +1306,11 @@ def predict_churn():
                     feat: round(score, 4) for feat, score in zip(trained_features, correlations)
                 }
 
-                logger.info(f"Fallback feature importances generated.")
             except Exception as e:
                 logger.error(f"Fallback importance generation failed: {str(e)}")
                 feature_importance = {}
 
-        # Sort and show top 15 features
+        # Return top features
         top_features = dict(sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:15])
 
         return jsonify({
@@ -1317,48 +1320,68 @@ def predict_churn():
         })
 
     except Exception as e:
-        logger.error(f"Prediction failed: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Unhandled error in /predict-churn: {str(e)}", exc_info=True)
         return jsonify({
-            "error": "Prediction failed",
+            "error": "Unhandled exception occurred",
             "message": str(e)
         }), 500
 
 @app.route("/churn-explanation/<int:user_id>", methods=["GET"])
 def churn_explanation(user_id):
+    """Generate detailed churn explanation for a specific user"""
     try:
-        user = User.query.get(user_id)
-        if not user:
-            return jsonify({"error": "User not found"}), 404
+        # Fetch processed data with churn predictions
+        full_df = get_customer_data_with_predictions()
+        if full_df is None or full_df.empty:
+            return jsonify({
+                "error": "No customer data available",
+                "timestamp": datetime.now().isoformat()
+            }), 404
 
-        # Simple interpretation based on feature thresholds (custom rules)
-        explanations = []
+        # Find user record
+        user_row = full_df[full_df["user_id"] == user_id]
+        if user_row.empty:
+            logger.warning(f"User {user_id} not found")
+            return jsonify({
+                "error": "User not found",
+                "message": f"No user found with ID {user_id}"
+            }), 404
 
-        if user.recency_days > 30:
-            explanations.append("User has not engaged recently (recency_days > 30).")
-        if user.total_orders < 3:
-            explanations.append("User has placed fewer than 3 orders.")
-        if user.total_spent < 1000:
-            explanations.append("User has spent less than ₹1000.")
-        if user.engagement_score and user.engagement_score < 0.3:
-            explanations.append("Low engagement score indicates reduced activity.")
-        if user.product_category == 'unknown':
-            explanations.append("User has not shown interest in specific product categories.")
+        user = user_row.iloc[0].to_dict()
+
+        # Generate churn explanation
+        explanation = generate_churn_explanation(user, user.get("churn_probability", 0.0))
 
         response = {
-            "user_id": user_id,
-            "churn_probability": user.churn_probability,
-            "churn_risk": user.churn_risk,
-            "explanations": explanations or ["No strong churn signals detected."]
+            "user_id": user["user_id"],
+            "username": user.get("user_name", "unknown"),
+            "email": user.get("user_email", "unknown"),
+            "state": user.get("state", "unknown"),
+            "gender": user.get("gender", "unknown"),
+            "age": user.get("age", None),
+            "recency_days": user.get("recency_days", None),
+            "total_orders": user.get("total_orders", None),
+            "total_spent": user.get("total_spent", None),
+            "engagement_score": user.get("engagement_score", None),
+            "churn_probability": round(float(user.get("churn_probability", 0.0)), 4),
+            "churn_risk": user.get("churn_risk", "Unknown"),
+            "customer_status": user.get("customer_status", "Unknown"),
+            "explanation": explanation,
+            "timestamp": datetime.now().isoformat(),
+            "model_version": MODEL_VERSION
         }
 
         return jsonify(response)
 
     except Exception as e:
-        logging.error(f"Error in churn_explanation route: {str(e)}")
-        traceback.print_exc()
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"Error generating churn explanation: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Internal server error",
+            "message": "Failed to generate churn explanation",
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
+    
 @app.errorhandler(500)
 def internal_error(error):
     logger.error(f"Server Error: {error}, Route: {request.url}")
