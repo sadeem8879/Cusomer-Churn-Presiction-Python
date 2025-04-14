@@ -1090,6 +1090,7 @@ def get_customer_segments():
     except Exception as e:
         logger.error(f"Error in /customer-segments: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 @app.route('/retention-rate', methods=['GET'])
 def get_retention_rate():
     """Calculate retention rate"""
@@ -1172,6 +1173,7 @@ def export_data():
     except Exception as e:
         logger.error(f"Error in /export: {str(e)}", exc_info=True)
         return jsonify({"error": "Failed to generate export"}), 500
+
 
 
 @app.route('/predict-churn', methods=['POST'])
